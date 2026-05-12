@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+checkpoint-*/
+*.safetensors
+*.pt
+*.pth
+.DS_Store
