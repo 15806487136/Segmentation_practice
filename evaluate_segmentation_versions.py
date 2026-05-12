@@ -106,8 +106,74 @@ def freeze_model_except_head(model):
 def train_and_evaluate(version: VersionConfig, quick: bool, seed: int):
     set_global_seed(seed)
     _, train_dataset, eval_dataset = build_datasets(quick)
-
     model = build_model(num_labels=3)
+
+    # If this is the 'new' improved version, run a two-stage fine-tuning:
+    # 1) freeze encoder and train short
+    # 2) unfreeze and continue training with (optionally) lower LR / weight decay
+    if version.name == "new":
+        # Stage 1: freeze encoder
+        freeze_model_except_head(model)
+        stage1_args = TrainingArguments(
+            output_dir=os.path.join("./outputs", f"segmentation_{version.name}_stage1"),
+            learning_rate=version.learning_rate,
+            num_train_epochs=1,
+            per_device_train_batch_size=2,
+            per_device_eval_batch_size=2,
+            gradient_accumulation_steps=1,
+            logging_steps=1,
+            remove_unused_columns=False,
+            dataloader_pin_memory=False,
+        )
+        trainer = CustomTrainer(
+            model=model,
+            args=stage1_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            compute_metrics=compute_metrics,
+        )
+        stage1_res = trainer.train()
+
+        # Stage 2: unfreeze all and continue with weight decay and slightly lower LR
+        for p in model.parameters():
+            p.requires_grad = True
+        stage2_args = TrainingArguments(
+            output_dir=os.path.join("./outputs", f"segmentation_{version.name}_stage2"),
+            learning_rate=version.learning_rate * 0.5,
+            weight_decay=0.01,
+            num_train_epochs=1 if quick else 2,
+            per_device_train_batch_size=2,
+            per_device_eval_batch_size=2,
+            gradient_accumulation_steps=1,
+            logging_steps=1,
+            remove_unused_columns=False,
+            dataloader_pin_memory=False,
+        )
+        trainer2 = CustomTrainer(
+            model=model,
+            args=stage2_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            compute_metrics=compute_metrics,
+        )
+        stage2_res = trainer2.train()
+
+        # Evaluate using the final model
+        predictions = trainer2.predict(eval_dataset)
+        metrics = compute_metrics((predictions.predictions, predictions.label_ids))
+        # Aggregate training loss as last stage's reported training_loss
+        training_loss = float(stage2_res.training_loss)
+        train_runtime = float(stage1_res.metrics.get("train_runtime", 0.0)) + float(stage2_res.metrics.get("train_runtime", 0.0))
+        return {
+            "version": version.name,
+            "freeze_encoder": True,
+            "training_loss": training_loss,
+            "train_runtime": train_runtime,
+            "pixel_accuracy": metrics["pixel_accuracy"],
+            "mean_iou": metrics["mean_iou"],
+        }
+
+    # Default (baseline) single-stage training
     if version.freeze_encoder:
         freeze_model_except_head(model)
 

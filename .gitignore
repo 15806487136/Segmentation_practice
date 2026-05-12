@@ -5,3 +5,5 @@ checkpoint-*/
 *.pt
 *.pth
 .DS_Store
+*.log
+slurm-*
