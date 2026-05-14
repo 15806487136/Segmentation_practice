@@ -19,6 +19,8 @@ segmentation_practice/
 ├── segmentation_improvements.py
 ├── segmentation_last.ipynb
 ├── segmentation_new.ipynb
+├── segmentation_3d_last.py
+├── segmentation_3d_new.py
 ├── segformer-finetuned-ade-improved/
 ├── segformer-finetuned-ade-short/
 └── .gitignore
@@ -52,6 +54,10 @@ segmentation_practice/
 - `training_loss`
 - `pixel_accuracy`
 - `mean_iou`
+
+### `segmentation_3d_last.py` / `segmentation_3d_new.py`
+
+3D 迭代的 `last/new` 对比脚本。`last` 作为稳定基线，`new` 作为实验版本，当前使用合成球体体数据和轻量 3D U-Net 做快速验证。
 
 ### `README.md`
 
@@ -96,6 +102,27 @@ conda activate med_phys
 ```
 
 这个脚本会分别训练和评估 `last` 与 `new` 两个配置，并打印对比结果。
+
+### 4. 运行 3D 基线（新战场）
+
+```bash
+/home/zhouyang/miniconda3/envs/med_phys/bin/python /home/zhouyang/segmentation_practice/segmentation_3d_baseline.py --quick
+```
+
+该脚本会在合成 3D 体数据上训练一个轻量 3D U-Net，并输出：
+
+- `train_loss`
+- `val_voxel_acc`
+- `val_dice_fg`
+
+### 5. 运行 3D 的 last/new 迭代
+
+```bash
+/home/zhouyang/miniconda3/envs/med_phys/bin/python /home/zhouyang/segmentation_practice/segmentation_3d_last.py --quick
+/home/zhouyang/miniconda3/envs/med_phys/bin/python /home/zhouyang/segmentation_practice/segmentation_3d_new.py --quick
+```
+
+其中 `segmentation_3d_last.py` 代表当前稳定基线，`segmentation_3d_new.py` 代表当前实验版本。两者会沿用同样的评估口径：`train_loss`、`val_voxel_acc`、`val_dice_fg`。
 
 ## 迭代流程
 

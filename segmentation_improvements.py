@@ -25,6 +25,9 @@ from transformers import (
 )
 
 
+PRETRAINED_SEGFORMER_NAME = "nvidia/segformer-b0-finetuned-ade-512-512"
+
+
 def make_synthetic_example(size=(128, 128), seed=None):
     if seed is not None:
         random.seed(seed)
@@ -115,11 +118,30 @@ def dice_loss(pred, target, ignore_index=255, eps=1e-6):
     return loss / total
 
 
+def focal_loss(logits, target, ignore_index=255, gamma=2.0, alpha=0.25):
+    valid_mask = target != ignore_index
+    if not torch.any(valid_mask):
+        return torch.tensor(0.0, device=logits.device)
+
+    target_clamped = target.clone()
+    target_clamped[~valid_mask] = 0
+    ce = F.cross_entropy(logits, target_clamped, reduction="none")
+    pt = torch.exp(-ce)
+    focal = alpha * (1 - pt) ** gamma * ce
+    focal = focal * valid_mask.float()
+    denom = valid_mask.float().sum().clamp_min(1.0)
+    return focal.sum() / denom
+
+
 class CustomTrainer(Trainer):
-    def __init__(self, dice_weight=1.0, ce_weight=1.0, *args, **kwargs):
+    def __init__(self, dice_weight=1.0, ce_weight=1.0, focal_weight=1.0, loss_mode="dice_ce", focal_gamma=2.0, focal_alpha=0.25, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dice_weight = dice_weight
         self.ce_weight = ce_weight
+        self.focal_weight = focal_weight
+        self.loss_mode = loss_mode
+        self.focal_gamma = focal_gamma
+        self.focal_alpha = focal_alpha
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop("labels")
@@ -129,24 +151,51 @@ class CustomTrainer(Trainer):
         if logits.shape[-2:] != labels.shape[-2:]:
             logits = F.interpolate(logits, size=labels.shape[-2:], mode="bilinear", align_corners=False)
         # logits: B x C x H x W, labels: B x H x W
-        ce = F.cross_entropy(logits, labels.to(logits.device), ignore_index=255)
         d = dice_loss(logits, labels.to(logits.device), ignore_index=255)
-        loss = self.ce_weight * ce + self.dice_weight * d
+        if self.loss_mode == "dice_focal":
+            fl = focal_loss(logits, labels.to(logits.device), ignore_index=255, gamma=self.focal_gamma, alpha=self.focal_alpha)
+            loss = self.dice_weight * d + self.focal_weight * fl
+        else:
+            ce = F.cross_entropy(logits, labels.to(logits.device), ignore_index=255)
+            loss = self.ce_weight * ce + self.dice_weight * d
         if return_outputs:
             return loss, outputs
         return loss
 
 
-def build_model(num_labels=3):
+def build_model(num_labels=3, use_pretrained=False):
+    id2label = {i: str(i) for i in range(num_labels)}
+    label2id = {str(i): i for i in range(num_labels)}
+
+    if use_pretrained:
+        return SegformerForSemanticSegmentation.from_pretrained(
+            PRETRAINED_SEGFORMER_NAME,
+            num_labels=num_labels,
+            id2label=id2label,
+            label2id=label2id,
+            ignore_mismatched_sizes=True,
+        )
+
     config = SegformerConfig(
         num_labels=num_labels,
-        id2label={i: str(i) for i in range(num_labels)},
-        label2id={str(i): i for i in range(num_labels)},
+        id2label=id2label,
+        label2id=label2id,
         hidden_sizes=[32, 64, 160, 256],
         hidden_dropout_prob=0.1,
     )
-    model = SegformerForSemanticSegmentation(config)
-    return model
+    return SegformerForSemanticSegmentation(config)
+
+
+def build_processor(use_pretrained=False):
+    if use_pretrained:
+        processor = SegformerImageProcessor.from_pretrained(
+            PRETRAINED_SEGFORMER_NAME,
+            do_reduce_labels=False,
+        )
+    else:
+        processor = SegformerImageProcessor(size={"height": 128, "width": 128})
+    processor.size = {"height": 128, "width": 128}
+    return processor
 
 
 def main(args):

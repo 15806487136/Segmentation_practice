@@ -20,14 +20,15 @@ from pathlib import Path
 import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from medical_physics.segmentation_improvements import (
+from segmentation_improvements import (
     CustomTrainer,
     RandomAug,
     SimpleSegDataset,
     SegformerImageProcessor,
     build_model,
+    build_processor,
 )
 from transformers import TrainingArguments
 
@@ -69,11 +70,13 @@ class VersionConfig:
     name: str
     freeze_encoder: bool = False
     learning_rate: float = 6e-5
+    use_pretrained: bool = False
+    strong_augment: bool = False
+    loss_mode: str = "dice_ce"
 
 
-def build_datasets(quick: bool):
-    processor = SegformerImageProcessor(do_reduce_labels=False)
-    processor.size = {"height": 512, "width": 512}
+def build_datasets(quick: bool, use_pretrained: bool, strong_augment: bool = False):
+    processor = build_processor(use_pretrained=use_pretrained)
 
     if quick:
         train_size = 20
@@ -82,7 +85,8 @@ def build_datasets(quick: bool):
         train_size = 40
         eval_size = 8
 
-    train_dataset = SimpleSegDataset(size=512, n=train_size, processor=processor, transforms=RandomAug(), seed=42)
+    augmenter = RandomAug(prob_flip=0.75, prob_rotate=0.5) if strong_augment else RandomAug()
+    train_dataset = SimpleSegDataset(size=512, n=train_size, processor=processor, transforms=augmenter, seed=42)
     eval_dataset = SimpleSegDataset(size=512, n=eval_size, processor=processor, transforms=None, seed=999)
     return processor, train_dataset, eval_dataset
 
@@ -105,8 +109,8 @@ def freeze_model_except_head(model):
 
 def train_and_evaluate(version: VersionConfig, quick: bool, seed: int):
     set_global_seed(seed)
-    _, train_dataset, eval_dataset = build_datasets(quick)
-    model = build_model(num_labels=3)
+    _, train_dataset, eval_dataset = build_datasets(quick, use_pretrained=version.use_pretrained, strong_augment=version.strong_augment)
+    model = build_model(num_labels=3, use_pretrained=version.use_pretrained)
 
     # If this is the 'new' improved version, run a two-stage fine-tuning:
     # 1) freeze encoder and train short
@@ -124,6 +128,9 @@ def train_and_evaluate(version: VersionConfig, quick: bool, seed: int):
             logging_steps=1,
             remove_unused_columns=False,
             dataloader_pin_memory=False,
+            lr_scheduler_type="cosine",
+            warmup_steps=2 if quick else 10,
+            max_grad_norm=1.0,
         )
         trainer = CustomTrainer(
             model=model,
@@ -131,6 +138,7 @@ def train_and_evaluate(version: VersionConfig, quick: bool, seed: int):
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             compute_metrics=compute_metrics,
+            loss_mode=version.loss_mode,
         )
         stage1_res = trainer.train()
 
@@ -139,15 +147,18 @@ def train_and_evaluate(version: VersionConfig, quick: bool, seed: int):
             p.requires_grad = True
         stage2_args = TrainingArguments(
             output_dir=os.path.join("./outputs", f"segmentation_{version.name}_stage2"),
-            learning_rate=version.learning_rate * 0.5,
-            weight_decay=0.01,
-            num_train_epochs=1 if quick else 2,
+            learning_rate=version.learning_rate * 0.25,
+            weight_decay=0.02,
+            num_train_epochs=2 if quick else 3,
             per_device_train_batch_size=2,
             per_device_eval_batch_size=2,
             gradient_accumulation_steps=1,
             logging_steps=1,
             remove_unused_columns=False,
             dataloader_pin_memory=False,
+            lr_scheduler_type="cosine",
+            warmup_steps=2 if quick else 10,
+            max_grad_norm=1.0,
         )
         trainer2 = CustomTrainer(
             model=model,
@@ -155,6 +166,7 @@ def train_and_evaluate(version: VersionConfig, quick: bool, seed: int):
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             compute_metrics=compute_metrics,
+            loss_mode=version.loss_mode,
         )
         stage2_res = trainer2.train()
 
@@ -187,6 +199,9 @@ def train_and_evaluate(version: VersionConfig, quick: bool, seed: int):
         logging_steps=1,
         remove_unused_columns=False,
         dataloader_pin_memory=False,
+        lr_scheduler_type="cosine",
+        warmup_steps=2 if quick else 10,
+        max_grad_norm=1.0,
     )
 
     trainer = CustomTrainer(
@@ -195,6 +210,7 @@ def train_and_evaluate(version: VersionConfig, quick: bool, seed: int):
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         compute_metrics=compute_metrics,
+        loss_mode=version.loss_mode,
     )
 
     train_result = trainer.train()
@@ -223,8 +239,8 @@ def main():
     set_global_seed(args.seed)
 
     versions = [
-        VersionConfig(name="last", freeze_encoder=args.last_freeze_encoder, learning_rate=args.last_lr),
-        VersionConfig(name="new", freeze_encoder=args.new_freeze_encoder, learning_rate=args.new_lr),
+        VersionConfig(name="last", freeze_encoder=args.last_freeze_encoder, learning_rate=args.last_lr, use_pretrained=False, strong_augment=False, loss_mode="dice_ce"),
+        VersionConfig(name="new", freeze_encoder=True, learning_rate=args.new_lr, use_pretrained=False, strong_augment=True, loss_mode="dice_focal"),
     ]
 
     results = [train_and_evaluate(version, quick=args.quick, seed=args.seed) for version in versions]
